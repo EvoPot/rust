@@ -113,8 +113,26 @@ pub fn new_parser_from_file<'a>(
 ) -> Result<Parser<'a>, Vec<Diag<'a>>> {
     let sm = psess.source_map();
     let source_file = sm.load_file(path).unwrap_or_else(|e| {
-        let msg = format!("couldn't read `{}`: {}", path.display(), e);
+        use std::io::ErrorKind;
+        let mut msg = match e.kind() {
+            ErrorKind::NotFound => format!("couldn't find file `{}`", path.display()),
+            ErrorKind::PermissionDenied => {
+                format!("insufficient permissions when opening file {}", path.display())
+            }
+            ErrorKind::IsADirectory => format!("{} is a directory", path.display()),
+            fb => format!("couldn't read `{}`: {}", path.display(), fb),
+        };
+
+        if let Some(path_str) = path.as_os_str().to_str()
+            && let Some(last_char) = path_str.chars().last()
+            && std::path::is_separator(last_char)
+            && !path.exists()
+        {
+            msg = format!("{} is a non existent directory", path.display());
+        }
+
         let mut err = psess.dcx().struct_fatal(msg);
+        parse_create_error_apply_suggestions(&mut err, path);
         if let Ok(contents) = std::fs::read(path)
             && let Err(utf8err) = std::str::from_utf8(&contents)
         {
@@ -126,6 +144,94 @@ pub fn new_parser_from_file<'a>(
         err.emit()
     });
     new_parser_from_source_file(psess, source_file, strip_tokens)
+}
+
+fn parse_create_error_apply_suggestions<E: EmissionGuarantee>(err: &mut Diag<'_, E>, path: &Path) {
+    let with_dot_rs = {
+        let mut this = path.to_owned();
+        this.set_extension("rs");
+        this
+    };
+
+    if let Some(path_str) = path.as_os_str().to_str()
+        && let Some(last_char) = path_str.chars().last()
+        && std::path::is_separator(last_char)
+        && with_dot_rs.exists()
+        && with_dot_rs.is_file()
+    {
+        err.help(format!(
+            "you might have meant to open `{}`: `rustc {}`",
+            with_dot_rs.display(),
+            with_dot_rs.display()
+        ));
+        return;
+    }
+
+    let prev_dir = path.ancestors().nth(1).unwrap_or(&Path::new(""));
+
+    if let Ok(current_dir) = std::env::current_dir()
+        && let Ok(read_dir) = current_dir.join(prev_dir).read_dir()
+        && let Some(file_name) = path.file_name()
+        && let Some(file_str) = file_name.to_str()
+    {
+        let mut best_lev = usize::MAX;
+        let mut best_path = String::new();
+        'inner: for dir_result in read_dir {
+            if let Ok(dir) = dir_result
+                && let Some(prev_dir_string) = prev_dir.to_str()
+                && let Ok(dir_string) = dir.file_name().into_string()
+            {
+                let lev = lev(&dir_string, file_str);
+                best_lev = std::cmp::min(lev, best_lev);
+                if lev == best_lev && dir.path().extension() == Some(std::ffi::OsStr::new("rs")) {
+                    let mut suggestion_string = prev_dir_string.to_owned();
+                    if !prev_dir_string.is_empty() {
+                        suggestion_string.push(std::path::MAIN_SEPARATOR);
+                    }
+                    suggestion_string.push_str(&dir_string);
+                    best_path = suggestion_string;
+                }
+                if best_lev == 1 {
+                    break 'inner;
+                }
+            }
+        }
+
+        if best_lev <= file_str.len() / 2
+            && (file_str.len() as i128 - best_path.len() as i128).abs() <= 3
+            && best_path.ends_with(".rs")
+        {
+            err.help(format!(
+                "you might have meant to open `{}`: `rustc {}`",
+                best_path, best_path
+            ));
+        }
+    }
+
+    /// Levenshtein distance algorithm : https://en.wikipedia.org/wiki/Levenshtein_distance
+    fn lev(a: &str, b: &str) -> usize {
+        if a.is_empty() || b.is_empty() {
+            return std::cmp::max(a.len(), b.len());
+        }
+        let mut matrix = vec![vec![0; b.len()]; a.len()];
+        for i in 1..a.len() {
+            matrix[i][0] = i;
+        }
+        for i in 1..b.len() {
+            matrix[0][i] = i;
+        }
+        for j in 1..b.len() {
+            for i in 1..a.len() {
+                let cost = if a.as_bytes()[i - 1] == b.as_bytes()[j - 1] { 0 } else { 1 };
+                matrix[i][j] =
+                    *[matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost]
+                        .iter()
+                        .min()
+                        .unwrap_or(&0);
+            }
+        }
+        matrix[a.len() - 1][b.len() - 1]
+    }
 }
 
 pub fn utf8_error<E: EmissionGuarantee>(

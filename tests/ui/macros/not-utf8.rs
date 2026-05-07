@@ -3,5 +3,5 @@
 
 fn foo() {
     include!("not-utf8.bin");
-    //~^ ERROR couldn't read `$DIR/not-utf8.bin`: stream did not contain valid UTF-8
+    //~^ ERROR couldn't read `$DIR/not-utf8.bin`: invalid data
 }

@@ -1,4 +1,4 @@
-error: couldn't read `$DIR/not-utf8.bin`: stream did not contain valid UTF-8
+error: couldn't read `$DIR/not-utf8.bin`: invalid data
   --> $DIR/not-utf8.rs:5:5
    |
 LL |     include!("not-utf8.bin");
